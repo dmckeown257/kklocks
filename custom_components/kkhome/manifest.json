@@ -3,10 +3,11 @@
   "name": "KK Home",
   "version": "0.1.0",
   "config_flow": true,
-  "documentation": "https://kksecurityhome.com",
+  "documentation": "https://github.com/dmckeown257/kklocks",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "codeowners": [],
+  "issue_tracker": "https://github.com/dmckeown257/kklocks/issues",
+  "codeowners": ["@dmckeown257"],
   "loggers": ["custom_components.kkhome"],
   "requirements": []
 }

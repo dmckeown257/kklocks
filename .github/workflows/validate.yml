@@ -1,0 +1,18 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Validate with HACS
+        uses: hacs/action@main
+        with:
+          category: integration

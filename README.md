@@ -35,6 +35,10 @@ The lock and unlock requests send encrypted `encryptData`, and status requests s
 
 Copy `custom_components/kkhome` into your Home Assistant config directory, or install through HACS as a custom repository.
 
+Current custom repository URL:
+
+- `https://github.com/dmckeown257/kklocks`
+
 ## Configure
 
 Add the integration from the Home Assistant UI:
