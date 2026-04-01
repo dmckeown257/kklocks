@@ -1,0 +1,58 @@
+{
+  "title": "KK Home",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to KK Home",
+        "description": "Use an access token or your KK Home account credentials. The default backend host was inferred from the public KK Home website.",
+        "data": {
+          "base_url": "Base URL",
+          "tenant_id": "Tenant ID",
+          "username": "Username or email",
+          "password": "Password",
+          "access_token": "Access token",
+          "login_path": "Login path",
+          "devices_path": "Devices path",
+          "device_detail_path": "Device detail path",
+          "lock_path": "Lock command path",
+          "status_path": "Status path",
+          "unlock_path": "Unlock command path",
+          "poll_interval": "Poll interval (seconds)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Authentication failed.",
+      "cannot_connect": "Connection failed or the default API paths do not match your app build."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KK Home Options",
+        "data": {
+          "access_token": "Access token",
+          "login_path": "Login path",
+          "devices_path": "Devices path",
+          "device_detail_path": "Device detail path",
+          "lock_path": "Lock command path",
+          "status_path": "Status path",
+          "unlock_path": "Unlock command path",
+          "poll_interval": "Poll interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "lock": {
+      "lock": {
+        "name": null
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      }
+    }
+  }
+}

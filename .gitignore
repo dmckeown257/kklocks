@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local traffic captures and reverse-engineering artifacts
+*.csv
+Raw_*.folder/
+*.folder/
+*.folder.folder/
+
+# Temporary local scripts
+/tmp/

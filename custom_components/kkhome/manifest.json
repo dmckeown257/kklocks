@@ -1,0 +1,12 @@
+{
+  "domain": "kkhome",
+  "name": "KK Home",
+  "version": "0.1.0",
+  "config_flow": true,
+  "documentation": "https://kksecurityhome.com",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "codeowners": [],
+  "loggers": ["custom_components.kkhome"],
+  "requirements": []
+}
