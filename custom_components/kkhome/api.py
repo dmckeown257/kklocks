@@ -235,7 +235,7 @@ class KKHomeApiClient:
             if locked is desired_locked:
                 return
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "KK Home command for %s did not reach desired state %s before timeout",
             device.device_id,
             desired_locked,
