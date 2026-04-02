@@ -114,7 +114,7 @@ class KKHomeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
 
 
-class KKHomeOptionsFlow(config_entries.OptionsFlow):
+class KKHomeOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     """KK Home options flow."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
