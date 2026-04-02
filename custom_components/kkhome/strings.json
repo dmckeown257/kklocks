@@ -43,7 +43,7 @@
   "entity": {
     "lock": {
       "lock": {
-        "name": null
+        "name": "Lock"
       }
     },
     "sensor": {

@@ -1,13 +1,13 @@
 {
   "domain": "kkhome",
   "name": "KK Home",
-  "version": "0.1.2",
+  "codeowners": ["@dmckeown257"],
   "config_flow": true,
   "documentation": "https://github.com/dmckeown257/kklocks",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/dmckeown257/kklocks/issues",
-  "codeowners": ["@dmckeown257"],
   "loggers": ["custom_components.kkhome"],
-  "requirements": []
+  "requirements": [],
+  "version": "0.1.2"
 }
