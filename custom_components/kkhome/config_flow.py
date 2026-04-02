@@ -117,10 +117,6 @@ class KKHomeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class KKHomeOptionsFlow(config_entries.OptionsFlow):
     """KK Home options flow."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
-
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Manage options."""
         if user_input is not None:
