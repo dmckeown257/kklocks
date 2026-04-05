@@ -16,9 +16,11 @@ from httpx import HTTPError
 
 from homeassistant.helpers.httpx_client import get_async_client
 
+from .ble import KKHomeBleController, KKHomeBleError, KKHomeBleUnavailableError
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_BASE_URL,
+    CONF_DEVICE_DETAIL_PATH,
     CONF_DEVICES_PATH,
     CONF_LOCK_PATH,
     CONF_LOGIN_PATH,
@@ -73,6 +75,7 @@ class KKHomeApiClient:
             password=None,
         )
         self._public_key = serialization.load_der_public_key(_SERVICE_PUBLIC_KEY)
+        self._ble = KKHomeBleController(hass)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -151,32 +154,68 @@ class KKHomeApiClient:
 
     async def async_lock(self, device: KKHomeLockDevice) -> None:
         """Send a lock command."""
-        await self._request(
+        if await self._try_ble_command(device):
+            await self._wait_for_lock_state(device, True)
+            return
+
+        payload = self._command_payload(device)
+        response = await self._request(
             "post",
             self._config[CONF_LOCK_PATH],
-            json_body=self._encrypt_payload(self._command_payload(device)),
+            json_body=self._encrypt_payload(payload),
             headers={_ENCRYPT_DATA_HEADER: _ENCRYPT_DATA_HEADER},
+        )
+        _LOGGER.debug(
+            "KK Home lock command response for %s using payload %s with ids %s: %s",
+            device.device_id,
+            payload,
+            self._debug_device_ids(device.raw),
+            response,
         )
         await self._wait_for_lock_state(device, True)
 
     async def async_unlock(self, device: KKHomeLockDevice) -> None:
         """Send an unlock command."""
-        await self._request(
+        if await self._try_ble_command(device):
+            await self._wait_for_lock_state(device, False)
+            return
+
+        payload = self._command_payload(device)
+        response = await self._request(
             "post",
             self._config[CONF_UNLOCK_PATH],
-            json_body=self._encrypt_payload(self._command_payload(device)),
+            json_body=self._encrypt_payload(payload),
             headers={_ENCRYPT_DATA_HEADER: _ENCRYPT_DATA_HEADER},
+        )
+        _LOGGER.debug(
+            "KK Home unlock command response for %s using payload %s with ids %s: %s",
+            device.device_id,
+            payload,
+            self._debug_device_ids(device.raw),
+            response,
         )
         await self._wait_for_lock_state(device, False)
 
     async def async_get_open_status(self, device: KKHomeLockDevice) -> Any:
         """Fetch the current open status for one device."""
-        payload = await self._request(
-            "post",
-            self._config[CONF_STATUS_PATH],
-            json_body=self._sign_payload({"esn": self._device_esn(device)}),
-        )
-        return payload
+        detail_payload = self._device_detail_payload(device)
+        try:
+            return await self._request(
+                "post",
+                self._config[CONF_DEVICE_DETAIL_PATH],
+                json_body=self._sign_payload(detail_payload),
+            )
+        except KKHomeApiError:
+            _LOGGER.debug(
+                "KK Home device detail fetch failed for %s, falling back to status endpoint",
+                device.device_id,
+                exc_info=True,
+            )
+            return await self._request(
+                "post",
+                self._config[CONF_STATUS_PATH],
+                json_body=self._sign_payload({"esn": self._device_esn(device)}),
+            )
 
     async def _with_live_status(
         self, devices: list[dict[str, Any]]
@@ -231,15 +270,59 @@ class KKHomeApiClient:
             locked = None
             if isinstance(status, dict):
                 locked = self._extract_locked(status)
+            _LOGGER.debug(
+                "KK Home post-command status poll for %s attempt %s: locked=%s payload=%s",
+                device.device_id,
+                _attempt + 1,
+                locked,
+                status,
+            )
 
             if locked is desired_locked:
                 return
 
-        _LOGGER.debug(
-            "KK Home command for %s did not reach desired state %s before timeout",
-            device.device_id,
-            desired_locked,
+        message = (
+            f"KK Home cloud command for {device.name} ({device.device_id}) was accepted "
+            f"but the device did not report the desired locked={desired_locked} state."
         )
+        _LOGGER.warning(
+            "%s Last known identifiers=%s",
+            message,
+            self._debug_device_ids(device.raw),
+        )
+        raise KKHomeApiError(message)
+
+    async def _try_ble_command(self, device: KKHomeLockDevice) -> bool:
+        """Attempt direct BLE lock control when the device exposes BLE credentials."""
+        if not self._supports_ble(device.raw):
+            return False
+
+        try:
+            await self._ble.async_set_lock_state(
+                device.raw,
+                currently_locked=device.is_locked,
+            )
+        except KKHomeBleUnavailableError:
+            _LOGGER.debug(
+                "KK Home BLE support unavailable on this host for %s",
+                device.device_id,
+                exc_info=True,
+            )
+            return False
+        except KKHomeBleError:
+            _LOGGER.warning(
+                "KK Home BLE command failed for %s; falling back to cloud command",
+                device.device_id,
+                exc_info=True,
+            )
+            return False
+
+        _LOGGER.debug(
+            "KK Home BLE command sent for %s using ids %s",
+            device.device_id,
+            self._debug_device_ids(device.raw),
+        )
+        return True
 
     async def _request(
         self,
@@ -250,6 +333,7 @@ class KKHomeApiClient:
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         allow_unauthenticated: bool = False,
+        retry_on_auth_failure: bool = True,
     ) -> Any:
         url = self._build_url(path)
         request_headers = self._headers if not allow_unauthenticated else {
@@ -295,6 +379,24 @@ class KKHomeApiClient:
             )
 
         if isinstance(parsed, dict):
+            if (
+                not allow_unauthenticated
+                and retry_on_auth_failure
+                and str(parsed.get("code")) == "444"
+                and "not logged in" in str(parsed.get("msg", "")).lower()
+            ):
+                _LOGGER.warning("KK Home token rejected for %s; retrying with a fresh login", url)
+                self._token = None
+                await self.async_authenticate()
+                return await self._request(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    headers=headers,
+                    allow_unauthenticated=allow_unauthenticated,
+                    retry_on_auth_failure=False,
+                )
             if parsed.get("success") is False:
                 _LOGGER.warning("KK Home API returned success=false for %s: %s", url, parsed)
                 raise KKHomeApiError(
@@ -480,6 +582,10 @@ class KKHomeApiClient:
             return str(esn)
         raise KKHomeApiError(f"Device {device.device_id} does not expose an ESN/wifiSN")
 
+    def _supports_ble(self, payload: dict[str, Any]) -> bool:
+        required_fields = ("bleMac", "password1", "password2")
+        return all(isinstance(payload.get(key), str) and payload.get(key) for key in required_fields)
+
     def _command_payload(self, device: KKHomeLockDevice) -> dict[str, Any]:
         user_number_id = self._first_value(device.raw, "userNumberId")
         if user_number_id is None:
@@ -490,6 +596,39 @@ class KKHomeApiClient:
             "esn": self._device_esn(device),
             "userNumberId": int(user_number_id),
         }
+
+    def _device_detail_payload(self, device: KKHomeLockDevice) -> dict[str, Any]:
+        """Build the richer device-detail query payload."""
+        payload: dict[str, Any] = {"esn": self._device_esn(device)}
+        device_id = self._first_value(device.raw, "_id", "deviceId", "id")
+        if device_id is not None:
+            payload["deviceId"] = str(device_id)
+        return payload
+
+    def _debug_device_ids(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return the most relevant device identifiers for diagnostics."""
+        keys = (
+            "_id",
+            "deviceId",
+            "id",
+            "did",
+            "deviceNo",
+            "wifiSN",
+            "esn",
+            "deviceSn",
+            "sn",
+            "userNumberId",
+            "lockId",
+            "gatewayId",
+            "type",
+            "deviceType",
+            "model",
+            "productName",
+            "openStatus",
+            "lockStatus",
+            "status",
+        )
+        return {key: payload.get(key) for key in keys if key in payload}
 
     def _sign_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         signed_payload = dict(payload)
