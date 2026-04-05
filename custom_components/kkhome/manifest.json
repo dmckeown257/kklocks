@@ -9,5 +9,5 @@
   "issue_tracker": "https://github.com/dmckeown257/kklocks/issues",
   "loggers": ["custom_components.kkhome"],
   "requirements": [],
-  "version": "0.1.2"
+  "version": "0.1.3"
 }

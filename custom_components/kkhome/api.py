@@ -10,9 +10,9 @@ import logging
 import time
 from typing import Any
 
-from aiohttp import ClientError
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from httpx import HTTPError
 
 from homeassistant.helpers.httpx_client import get_async_client
 
@@ -269,7 +269,7 @@ class KKHomeApiClient:
                 params=params,
                 json=json_body,
             )
-        except ClientError as err:
+        except HTTPError as err:
             _LOGGER.exception("KK Home HTTP client error for %s", url)
             raise KKHomeApiError(f"Request failed for {url}: {err}") from err
 
