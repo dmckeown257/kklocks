@@ -69,7 +69,9 @@ The setup form still exposes the API paths in case KK changes them later.
 ## Notes
 
 - The app signs requests with an embedded RSA private key and encrypts command/login payloads with the service public key.
-- Live lock state is refreshed with `/v3/device/get-open-status`, and command completion waits briefly for the KK Home cloud to catch up.
+- JWT sessions from the app captures expire after about 2 hours, so the integration now proactively refreshes login tokens when username/password auth is configured.
+- Wi-Fi/cloud control remains the primary command path. BLE is treated as a best-effort optimization when local Bluetooth is available and the lock exposes usable BLE credentials.
+- Live lock state is refreshed with `/v3/device/get-open-status`, and command completion waits briefly for the KK Home cloud to catch up without failing immediately if the state update lags.
 - In my environment, `openStatus = 2` maps to unlocked and `openStatus = 1` maps to locked.
 - This project is not affiliated with Veise, KK Home, Kaadas, or Home Assistant.
 

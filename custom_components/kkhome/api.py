@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from base64 import b64decode, b64encode
+from base64 import b64decode, b64encode, urlsafe_b64decode
 from dataclasses import dataclass
 import json
 import logging
@@ -40,6 +40,10 @@ _SERVICE_PUBLIC_KEY = b64decode(
     "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDAhvfVLGrJ/M3xpUnT1xlN30E1UESxhAmGmFyTx3p3vpxF4zMYpUjwHckCvg/zvZwhNTgsm3CNT7LAdE8lCl2YK4BoUZ6IYbbXSOa02/brASX4kjpOPbTcaDfYud2CFWQba95d5dlf3Jf9Z3eTPwNK7YQ0LDDWMOQ6LxoGqcLciQIDAQAB"
 )
 _ENCRYPT_DATA_HEADER = "encrypt_data"
+_AUTH_REFRESH_SKEW_SECONDS = 300
+_APP_VERSION = "3.3.1"
+_PHONE_NAME = "iPhone17,1"
+_USER_AGENT = "KKHome/3.3.1 (iPhone; iOS 26.3.1; Scale/3.00)"
 
 
 class KKHomeApiError(Exception):
@@ -70,12 +74,14 @@ class KKHomeApiClient:
         self._client = get_async_client(hass)
         self._config = config
         self._token: str | None = config.get(CONF_ACCESS_TOKEN)
+        self._token_expires_at = self._decode_token_expiration(self._token)
         self._private_key = serialization.load_der_private_key(
             _APP_PRIVATE_KEY,
             password=None,
         )
         self._public_key = serialization.load_der_public_key(_SERVICE_PUBLIC_KEY)
         self._ble = KKHomeBleController(hass)
+        self._auth_lock = asyncio.Lock()
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -84,9 +90,9 @@ class KKHomeApiClient:
             "k-language": "en_US",
             "k-signv": "1.0.0",
             "k-tenant": str(self._config[CONF_TENANT_ID]),
-            "k-version": "3.2.3",
-            "phoneName": "iPhone17,1",
-            "User-Agent": "KKHome/3.2.3 (iPhone; iOS 26.3.1; Scale/3.00)",
+            "k-version": _APP_VERSION,
+            "phoneName": _PHONE_NAME,
+            "User-Agent": _USER_AGENT,
         }
         if self._token:
             headers["token"] = self._token
@@ -94,35 +100,38 @@ class KKHomeApiClient:
 
     async def async_authenticate(self) -> None:
         """Authenticate if a static token was not configured."""
-        if self._token:
-            return
+        async with self._auth_lock:
+            if self._token and not self._token_needs_refresh():
+                return
 
-        username = self._config.get(CONF_USERNAME)
-        password = self._config.get(CONF_PASSWORD)
-        if not username or not password:
-            raise KKHomeAuthError(
-                "Set an access token or provide a username and password."
-            )
+            username = self._config.get(CONF_USERNAME)
+            password = self._config.get(CONF_PASSWORD)
+            if not username or not password:
+                if self._token:
+                    return
+                raise KKHomeAuthError(
+                    "Set an access token or provide a username and password."
+                )
 
-        payload = {"mail": username, "password": password}
-        try:
-            data = await self._request(
-                "post",
-                self._config[CONF_LOGIN_PATH],
-                json_body=self._encrypt_payload(payload),
-                headers={_ENCRYPT_DATA_HEADER: _ENCRYPT_DATA_HEADER},
-                allow_unauthenticated=True,
-            )
-        except KKHomeAuthError:
-            raise
-        except KKHomeApiError as err:
-            raise KKHomeAuthError(str(err)) from err
-        token = self._find_token(data)
-        if not token:
-            raise KKHomeAuthError(
-                "Login succeeded but no token was found in the response."
-            )
-        self._token = token
+            payload = {"mail": username, "password": password}
+            try:
+                data = await self._request(
+                    "post",
+                    self._config[CONF_LOGIN_PATH],
+                    json_body=self._encrypt_payload(payload),
+                    headers={_ENCRYPT_DATA_HEADER: _ENCRYPT_DATA_HEADER},
+                    allow_unauthenticated=True,
+                )
+            except KKHomeAuthError:
+                raise
+            except KKHomeApiError as err:
+                raise KKHomeAuthError(str(err)) from err
+            token = self._find_token(data)
+            if not token:
+                raise KKHomeAuthError(
+                    "Login succeeded but no token was found in the response."
+                )
+            self._set_token(token)
 
     async def async_test_connection(self) -> None:
         """Test authentication and device listing."""
@@ -253,7 +262,7 @@ class KKHomeApiClient:
 
     async def _wait_for_lock_state(
         self, device: KKHomeLockDevice, desired_locked: bool
-    ) -> None:
+    ) -> bool:
         """Wait briefly for the cloud status to reflect a lock/unlock command."""
         for _attempt in range(8):
             await asyncio.sleep(1)
@@ -279,22 +288,26 @@ class KKHomeApiClient:
             )
 
             if locked is desired_locked:
-                return
+                return True
 
-        message = (
-            f"KK Home cloud command for {device.name} ({device.device_id}) was accepted "
-            f"but the device did not report the desired locked={desired_locked} state."
-        )
         _LOGGER.warning(
-            "%s Last known identifiers=%s",
-            message,
+            "KK Home command for %s (%s) was accepted but the device did not report "
+            "the desired locked=%s state within the verification window. "
+            "The coordinator will keep polling and the lock may still complete.",
+            device.name,
+            device.device_id,
+            desired_locked,
+        )
+        _LOGGER.debug(
+            "KK Home post-command verification timed out for %s; identifiers=%s",
+            device.device_id,
             self._debug_device_ids(device.raw),
         )
-        raise KKHomeApiError(message)
+        return False
 
     async def _try_ble_command(self, device: KKHomeLockDevice) -> bool:
         """Attempt direct BLE lock control when the device exposes BLE credentials."""
-        if not self._supports_ble(device.raw):
+        if not self._supports_ble(device.raw) or device.is_locked is None:
             return False
 
         try:
@@ -311,7 +324,8 @@ class KKHomeApiClient:
             return False
         except KKHomeBleError:
             _LOGGER.warning(
-                "KK Home BLE command failed for %s; falling back to cloud command",
+                "KK Home BLE command failed for %s (%s); falling back to cloud control",
+                device.name,
                 device.device_id,
                 exc_info=True,
             )
@@ -335,6 +349,14 @@ class KKHomeApiClient:
         allow_unauthenticated: bool = False,
         retry_on_auth_failure: bool = True,
     ) -> Any:
+        if (
+            not allow_unauthenticated
+            and retry_on_auth_failure
+            and self._token_needs_refresh()
+            and self._credentials_available()
+        ):
+            await self.async_authenticate()
+
         url = self._build_url(path)
         request_headers = self._headers if not allow_unauthenticated else {
             key: value
@@ -368,6 +390,23 @@ class KKHomeApiClient:
             parsed = self._decrypt_response(parsed["encryptData"])
 
         if response.status_code in (401, 403):
+            if (
+                not allow_unauthenticated
+                and retry_on_auth_failure
+                and self._credentials_available()
+            ):
+                _LOGGER.warning("KK Home auth rejected for %s; retrying with a fresh login", url)
+                self._clear_token()
+                await self.async_authenticate()
+                return await self._request(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    headers=headers,
+                    allow_unauthenticated=allow_unauthenticated,
+                    retry_on_auth_failure=False,
+                )
             _LOGGER.warning("KK Home auth rejected for %s: %s", url, text)
             raise KKHomeAuthError(
                 f"Authentication failed for {url}: HTTP {response.status_code}"
@@ -382,11 +421,11 @@ class KKHomeApiClient:
             if (
                 not allow_unauthenticated
                 and retry_on_auth_failure
-                and str(parsed.get("code")) == "444"
-                and "not logged in" in str(parsed.get("msg", "")).lower()
+                and self._response_needs_reauthentication(parsed)
+                and self._credentials_available()
             ):
                 _LOGGER.warning("KK Home token rejected for %s; retrying with a fresh login", url)
-                self._token = None
+                self._clear_token()
                 await self.async_authenticate()
                 return await self._request(
                     method,
@@ -396,6 +435,12 @@ class KKHomeApiClient:
                     headers=headers,
                     allow_unauthenticated=allow_unauthenticated,
                     retry_on_auth_failure=False,
+                )
+            if self._response_needs_reauthentication(parsed):
+                raise KKHomeAuthError(
+                    parsed.get("msg")
+                    or parsed.get("message")
+                    or "Authentication failed"
                 )
             if parsed.get("success") is False:
                 _LOGGER.warning("KK Home API returned success=false for %s: %s", url, parsed)
@@ -552,6 +597,69 @@ class KKHomeApiClient:
                 if token:
                     return token
         return None
+
+    def _credentials_available(self) -> bool:
+        username = self._config.get(CONF_USERNAME)
+        password = self._config.get(CONF_PASSWORD)
+        return bool(username and password)
+
+    def _set_token(self, token: str | None) -> None:
+        self._token = token or None
+        self._token_expires_at = self._decode_token_expiration(self._token)
+
+    def _clear_token(self) -> None:
+        self._set_token(None)
+
+    def _token_needs_refresh(self) -> bool:
+        if not self._token:
+            return True
+        if self._token_expires_at is None:
+            return False
+        return time.time() >= self._token_expires_at - _AUTH_REFRESH_SKEW_SECONDS
+
+    def _decode_token_expiration(self, token: str | None) -> int | None:
+        claims = self._decode_jwt_claims(token)
+        if not isinstance(claims, dict):
+            return None
+        expires_at = claims.get("exp")
+        if isinstance(expires_at, (int, float)):
+            return int(expires_at)
+        if isinstance(expires_at, str) and expires_at.isdigit():
+            return int(expires_at)
+        return None
+
+    def _decode_jwt_claims(self, token: str | None) -> dict[str, Any] | None:
+        if not token or token.count(".") < 2:
+            return None
+        try:
+            payload = token.split(".", 2)[1]
+            padded = payload + "=" * (-len(payload) % 4)
+            decoded = urlsafe_b64decode(padded.encode())
+            claims = json.loads(decoded.decode())
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return claims if isinstance(claims, dict) else None
+
+    def _response_needs_reauthentication(self, payload: dict[str, Any]) -> bool:
+        code = str(payload.get("code", "")).strip()
+        if code in {"401", "403", "444"}:
+            return True
+
+        message = " ".join(
+            str(payload.get(key, ""))
+            for key in ("msg", "message", "error", "detail")
+        ).lower()
+        return any(
+            marker in message
+            for marker in (
+                "not logged in",
+                "login expired",
+                "token expired",
+                "invalid token",
+                "unauthorized",
+                "forbidden",
+            )
+        )
 
     def _first_value(self, payload: dict[str, Any], *keys: str) -> Any:
         for key in keys:
