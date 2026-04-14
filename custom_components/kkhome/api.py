@@ -44,6 +44,7 @@ _AUTH_REFRESH_SKEW_SECONDS = 300
 _APP_VERSION = "3.3.1"
 _PHONE_NAME = "iPhone17,1"
 _USER_AGENT = "KKHome/3.3.1 (iPhone; iOS 26.3.1; Scale/3.00)"
+_COMMAND_STATE_GRACE_SECONDS = 90
 
 
 class KKHomeApiError(Exception):
@@ -82,6 +83,7 @@ class KKHomeApiClient:
         self._public_key = serialization.load_der_public_key(_SERVICE_PUBLIC_KEY)
         self._ble = KKHomeBleController(hass)
         self._auth_lock = asyncio.Lock()
+        self._command_state_overrides: dict[str, tuple[bool, float]] = {}
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -164,6 +166,7 @@ class KKHomeApiClient:
     async def async_lock(self, device: KKHomeLockDevice) -> None:
         """Send a lock command."""
         if await self._try_ble_command(device):
+            self._remember_command_state(device.device_id, True)
             await self._wait_for_lock_state(device, True)
             return
 
@@ -181,11 +184,13 @@ class KKHomeApiClient:
             self._debug_device_ids(device.raw),
             response,
         )
+        self._remember_command_state(device.device_id, True)
         await self._wait_for_lock_state(device, True)
 
     async def async_unlock(self, device: KKHomeLockDevice) -> None:
         """Send an unlock command."""
         if await self._try_ble_command(device):
+            self._remember_command_state(device.device_id, False)
             await self._wait_for_lock_state(device, False)
             return
 
@@ -203,6 +208,7 @@ class KKHomeApiClient:
             self._debug_device_ids(device.raw),
             response,
         )
+        self._remember_command_state(device.device_id, False)
         await self._wait_for_lock_state(device, False)
 
     async def async_get_open_status(self, device: KKHomeLockDevice) -> Any:
@@ -528,7 +534,7 @@ class KKHomeApiClient:
         return KKHomeLockDevice(
             device_id=str(device_id),
             name=str(name),
-            is_locked=self._extract_locked(device),
+            is_locked=self._effective_locked_state(str(device_id), device),
             battery_level=self._extract_battery(device),
             raw=device,
         )
@@ -574,6 +580,25 @@ class KKHomeApiClient:
             return self._extract_battery(nested)
         return None
 
+    def _effective_locked_state(
+        self, device_id: str, device: dict[str, Any]
+    ) -> bool | None:
+        locked = self._extract_locked(device)
+        override = self._command_state_overrides.get(device_id)
+        if override is None:
+            return locked
+
+        desired_locked, expires_at = override
+        if time.time() >= expires_at:
+            self._command_state_overrides.pop(device_id, None)
+            return locked
+
+        if locked is desired_locked:
+            self._command_state_overrides.pop(device_id, None)
+            return locked
+
+        return desired_locked
+
     def _find_token(self, payload: Any) -> str | None:
         if isinstance(payload, str):
             return payload
@@ -602,6 +627,12 @@ class KKHomeApiClient:
         username = self._config.get(CONF_USERNAME)
         password = self._config.get(CONF_PASSWORD)
         return bool(username and password)
+
+    def _remember_command_state(self, device_id: str, desired_locked: bool) -> None:
+        self._command_state_overrides[device_id] = (
+            desired_locked,
+            time.time() + _COMMAND_STATE_GRACE_SECONDS,
+        )
 
     def _set_token(self, token: str | None) -> None:
         self._token = token or None
