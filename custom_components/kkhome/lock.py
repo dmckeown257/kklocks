@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .api import KKHomeApiError, KKHomeLockDevice
 from .const import ATTR_RAW_STATE, DOMAIN
 from .entity import KKHomeEntity
 
@@ -45,10 +49,23 @@ class KKHomeLockEntity(KKHomeEntity, LockEntity):
 
     async def async_lock(self, **kwargs) -> None:
         """Lock the device."""
-        await self.coordinator.api.async_lock(self.device)
-        await self.coordinator.async_request_refresh()
+        await self._async_send_command(self.coordinator.api.async_lock, "lock")
 
     async def async_unlock(self, **kwargs) -> None:
         """Unlock the device."""
-        await self.coordinator.api.async_unlock(self.device)
-        await self.coordinator.async_request_refresh()
+        await self._async_send_command(self.coordinator.api.async_unlock, "unlock")
+
+    async def _async_send_command(
+        self,
+        command: Callable[[KKHomeLockDevice], Awaitable[None]],
+        action: str,
+    ) -> None:
+        """Run a lock command and resync state even when it fails."""
+        try:
+            await command(self.device)
+        except KKHomeApiError as err:
+            raise HomeAssistantError(
+                f"Failed to {action} {self.device.name}: {err}"
+            ) from err
+        finally:
+            await self.coordinator.async_request_refresh()
