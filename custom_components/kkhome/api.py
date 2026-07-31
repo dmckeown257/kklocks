@@ -45,6 +45,9 @@ _APP_VERSION = "3.3.1"
 _PHONE_NAME = "iPhone17,1"
 _USER_AGENT = "KKHome/3.3.1 (iPhone; iOS 26.3.1; Scale/3.00)"
 _COMMAND_STATE_GRACE_SECONDS = 90
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
+_RETRYABLE_STATUS_CODES = {408, 429}
 
 
 class KKHomeApiError(Exception):
@@ -53,6 +56,10 @@ class KKHomeApiError(Exception):
 
 class KKHomeAuthError(KKHomeApiError):
     """Raised when authentication fails."""
+
+
+class KKHomeConnectionError(KKHomeApiError):
+    """Raised when the KK Home API is unreachable or returns a transient error."""
 
 
 @dataclass(slots=True)
@@ -219,6 +226,7 @@ class KKHomeApiClient:
                 "post",
                 self._config[CONF_DEVICE_DETAIL_PATH],
                 json_body=self._sign_payload(detail_payload),
+                retryable=False,
             )
         except KKHomeApiError:
             _LOGGER.debug(
@@ -230,6 +238,7 @@ class KKHomeApiClient:
                 "post",
                 self._config[CONF_STATUS_PATH],
                 json_body=self._sign_payload({"esn": self._device_esn(device)}),
+                retryable=False,
             )
 
     async def _with_live_status(
@@ -354,6 +363,47 @@ class KKHomeApiClient:
         headers: dict[str, str] | None = None,
         allow_unauthenticated: bool = False,
         retry_on_auth_failure: bool = True,
+        retryable: bool = True,
+    ) -> Any:
+        attempts = _RETRY_ATTEMPTS if retryable else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._request_once(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    headers=headers,
+                    allow_unauthenticated=allow_unauthenticated,
+                    retry_on_auth_failure=retry_on_auth_failure,
+                )
+            except KKHomeConnectionError as err:
+                if attempt == attempts:
+                    raise
+                delay = _RETRY_BACKOFF_SECONDS[
+                    min(attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)
+                ]
+                _LOGGER.warning(
+                    "KK Home request to %s failed (attempt %s/%s), retrying in %ss: %s",
+                    path,
+                    attempt,
+                    attempts,
+                    delay,
+                    err,
+                )
+                await asyncio.sleep(delay)
+        raise KKHomeApiError(f"Request failed for {path}")
+
+    async def _request_once(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        allow_unauthenticated: bool = False,
+        retry_on_auth_failure: bool = True,
     ) -> Any:
         if (
             not allow_unauthenticated
@@ -382,8 +432,8 @@ class KKHomeApiClient:
                 json=json_body,
             )
         except HTTPError as err:
-            _LOGGER.exception("KK Home HTTP client error for %s", url)
-            raise KKHomeApiError(f"Request failed for {url}: {err}") from err
+            _LOGGER.debug("KK Home HTTP client error for %s", url, exc_info=True)
+            raise KKHomeConnectionError(f"Request failed for {url}: {err}") from err
 
         text = response.text
         parsed: Any
@@ -412,6 +462,7 @@ class KKHomeApiClient:
                     headers=headers,
                     allow_unauthenticated=allow_unauthenticated,
                     retry_on_auth_failure=False,
+                    retryable=False,
                 )
             _LOGGER.warning("KK Home auth rejected for %s: %s", url, text)
             raise KKHomeAuthError(
@@ -419,9 +470,13 @@ class KKHomeApiClient:
             )
         if response.status_code >= 400:
             _LOGGER.warning("KK Home HTTP error for %s: %s", url, text)
-            raise KKHomeApiError(
-                f"Request failed for {url}: HTTP {response.status_code}: {text}"
-            )
+            message = f"Request failed for {url}: HTTP {response.status_code}: {text}"
+            if (
+                response.status_code >= 500
+                or response.status_code in _RETRYABLE_STATUS_CODES
+            ):
+                raise KKHomeConnectionError(message)
+            raise KKHomeApiError(message)
 
         if isinstance(parsed, dict):
             if (
@@ -441,6 +496,7 @@ class KKHomeApiClient:
                     headers=headers,
                     allow_unauthenticated=allow_unauthenticated,
                     retry_on_auth_failure=False,
+                    retryable=False,
                 )
             if self._response_needs_reauthentication(parsed):
                 raise KKHomeAuthError(

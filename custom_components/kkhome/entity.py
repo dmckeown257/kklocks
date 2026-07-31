@@ -19,11 +19,24 @@ class KKHomeEntity(CoordinatorEntity[KKHomeCoordinator]):
         """Initialize entity."""
         super().__init__(coordinator)
         self._device_id = device_id
+        self._last_device = coordinator.data.locks[device_id]
 
     @property
     def device(self):
-        """Return the current normalized device."""
-        return self.coordinator.data.locks[self._device_id]
+        """Return the current normalized device, falling back to the last seen one.
+
+        Never raises: if the device is temporarily missing from coordinator
+        data, the entity reports unavailable instead of crashing state writes.
+        """
+        device = self.coordinator.data.locks.get(self._device_id)
+        if device is not None:
+            self._last_device = device
+        return self._last_device
+
+    @property
+    def available(self) -> bool:
+        """Return True when polling works and the device is in the device list."""
+        return super().available and self._device_id in self.coordinator.data.locks
 
     @property
     def device_info(self) -> DeviceInfo:
